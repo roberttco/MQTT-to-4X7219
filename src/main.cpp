@@ -15,14 +15,22 @@ MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
 const uint8_t CHAR_SPACING = 1;
 uint8_t SCROLL_DELAY = 75;
 uint8_t DEFAULT_INTENSITY = 5;
+uint8_t DIM_INTENSITY = 2;
 
 bool connectionEstablished = false;
 
 // waiting breathing intensity change
+unsigned long lastBreath = 0;
 bool waiting = false;
 int inhale = 1;
 int mqtt_intensity = DEFAULT_INTENSITY;
 int breath_intensity = DEFAULT_INTENSITY;
+
+// display dim after a period
+unsigned long dimDelayMs = 15000;
+unsigned long dimTimerStart = 0;
+int dimLevel = DIM_INTENSITY;
+bool dimmed = false;
 
 void printText(uint8_t modStart, uint8_t modEnd, const char *pMsg)
 // Print the text string to the LED matrix modules specified.
@@ -108,17 +116,31 @@ void setup()
   client.enableHTTPWebUpdater("update", "update", "/"); // Activate the web updater, must be set before the first loop() call.
 
   printText(0, MAX_DEVICES - 1, "WiFi?");
+
+  dimTimerStart = millis();
 }
 
 void onConnectionEstablished()
 {
-  client.subscribe("leddisplay/intensity", [](const String &payload)
+  client.subscribe("leddisplay/brightness", [](const String &payload)
                    {
-                    Serial.printf("MQTT intensity = %s\n",payload.c_str());
-    // map intensity of 0-100% to 0-15 for the max7219 
-    int mapped = payload.toInt() * 15 / 100;
-    mqtt_intensity = mapped;
-    mx.control(MD_MAX72XX::INTENSITY, mapped); });
+                    Serial.printf("MQTT brightness = %s\n",payload.c_str());
+                    // map intensity of 0-100% to 0-15 for the max7219 
+                    int mapped = min<int>(abs(payload.toInt()),100) * 15 / 100;
+                    mqtt_intensity = mapped;
+                    mx.control(MD_MAX72XX::INTENSITY, mapped); });
+
+  client.subscribe("leddisplay/dimdelay", [](const String &payload)
+                   {
+                    Serial.printf("MQTT dim delay = %s\n",payload.c_str());
+                    dimDelayMs = min<int>(abs(payload.toInt()),3600) * 1000;
+                   });
+
+  client.subscribe("leddisplay/dimlevel", [](const String &payload)
+                   {
+                    Serial.printf("MQTT dim level = %s\n",payload.c_str());
+                    dimLevel = min<int>(abs(payload.toInt()),15);
+                   });   
 
   client.subscribe("leddisplay/message", [](const String &payload)
                    {
@@ -127,6 +149,8 @@ void onConnectionEstablished()
                      if (!payload.isEmpty())
                      {
                        waiting = false;
+                       dimTimerStart = millis();
+                       dimmed = false;
                        mx.control(MD_MAX72XX::INTENSITY, mqtt_intensity);
                      }
 
@@ -144,8 +168,6 @@ void onConnectionEstablished()
   waiting = true;
   connectionEstablished = true;
 }
-
-unsigned long lastBreath = 0;
 
 void loop()
 {
@@ -170,5 +192,12 @@ void loop()
 
       lastBreath = millis();
     }
+  }
+
+  if (!waiting && !dimmed && (millis() - dimTimerStart > dimDelayMs))
+  {
+    Serial.println("dimming");
+    dimmed = true;
+    mx.control(MD_MAX72XX::INTENSITY, dimLevel);
   }
 }
