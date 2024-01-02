@@ -1,27 +1,21 @@
-#include <ESP8266WiFi.h>
-#include <MD_MAX72xx.h>
-#include <SPI.h>
-#include "EspMQTTClient.h"
+/**
+ * WiFiManagerParameter child class example
+ */
+#include "wifisetup.h"
+#include "matrix.h"
 
-#define MAX_DEVICES 4
+#include "EspMQTTclient.h"
 
-#define CLK_PIN D5  // or SCK
-#define DATA_PIN D7 // or MOSI
-#define CS_PIN D8   // or SS
+Settings sett;
 
-#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
-
-const uint8_t CHAR_SPACING = 1;
-uint8_t SCROLL_DELAY = 75;
-uint8_t DEFAULT_INTENSITY = 5;
-uint8_t DIM_INTENSITY = 2;
+MD_MAX72XX *mx;
 
 bool connectionEstablished = false;
+bool waiting = false;
 
 // waiting breathing intensity change
 unsigned long lastBreath = 0;
-bool waiting = false;
+
 int inhale = 1;
 int mqtt_intensity = DEFAULT_INTENSITY;
 int breath_intensity = DEFAULT_INTENSITY;
@@ -32,172 +26,175 @@ unsigned long dimTimerStart = 0;
 int dimLevel = DIM_INTENSITY;
 bool dimmed = false;
 
-void printText(uint8_t modStart, uint8_t modEnd, const char *pMsg)
-// Print the text string to the LED matrix modules specified.
-// Message area is padded with blank columns after printing.
-{
-  uint8_t state = 0;
-  uint8_t curLen = 0;
-  uint16_t showLen = 0;
-  uint8_t cBuf[8];
-  int16_t col = ((modEnd + 1) * COL_SIZE) - 1;
-
-  mx.control(modStart, modEnd, MD_MAX72XX::UPDATE, MD_MAX72XX::OFF);
-
-  char *p = (char *)pMsg;
-
-  do // finite state machine to print the characters in the space available
-  {
-    switch (state)
-    {
-    case 0: // Load the next character from the font table
-      // if we reached end of message, reset the message pointer
-      if (*p == '\0')
-      {
-        showLen = col - (modEnd * COL_SIZE); // padding characters
-        state = 2;
-        break;
-      }
-
-      // retrieve the next character form the font file
-      showLen = mx.getChar(*p++, sizeof(cBuf) / sizeof(cBuf[0]), cBuf);
-      curLen = 0;
-      state++;
-      // !! deliberately fall through to next state to start displaying
-
-    case 1: // display the next part of the character
-      mx.setColumn(col--, cBuf[curLen++]);
-
-      // done with font character, now display the space between chars
-      if (curLen == showLen)
-      {
-        showLen = CHAR_SPACING;
-        state = 2;
-      }
-      break;
-
-    case 2: // initialize state for displaying empty columns
-      curLen = 0;
-      state++;
-      // fall through
-
-    case 3: // display inter-character spacing or end of message padding (blank columns)
-      mx.setColumn(col--, 0);
-      curLen++;
-      if (curLen == showLen)
-        state = 0;
-      break;
-
-    default:
-      col = -1; // this definitely ends the do loop
-    }
-  } while (col >= (modStart * COL_SIZE));
-
-  mx.control(modStart, modEnd, MD_MAX72XX::UPDATE, MD_MAX72XX::ON);
-}
-
-EspMQTTClient client(
-    "qsvMIMt8Fm6NV3",
-    "UbKNUJakLBLpOh",
-    "192.168.2.6",
-    // "BROKER_USER",
-    // "BROKER_PASSWORD",
-    "MAX7219_DISPLAY", // Client name that uniquely identify your device
-    24552              // The MQTT port, default to 1883. this line can be omitted
-);
-
-void setup()
-{
-  Serial.begin(115200);
-  mx.begin();
-  mx.control(MD_MAX72XX::INTENSITY, DEFAULT_INTENSITY);
-
-  // client.enableDebuggingMessages();
-  client.enableHTTPWebUpdater("update", "update", "/"); // Activate the web updater, must be set before the first loop() call.
-
-  printText(0, MAX_DEVICES - 1, "WiFi?");
-
-  dimTimerStart = millis();
-}
+EspMQTTClient *client;
 
 void onConnectionEstablished()
 {
-  client.subscribe("leddisplay/brightness", [](const String &payload)
-                   {
-                    Serial.printf("MQTT brightness = %s\n",payload.c_str());
-                    // map intensity of 0-100% to 0-15 for the max7219 
-                    int mapped = min<int>(abs(payload.toInt()),100) * 15 / 100;
-                    mqtt_intensity = mapped;
-                    mx.control(MD_MAX72XX::INTENSITY, mapped); });
+    Serial.println("MQTT connection established");
 
-  client.subscribe("leddisplay/dimdelay", [](const String &payload)
-                   {
-                    Serial.printf("MQTT dim delay = %s\n",payload.c_str());
-                    dimDelayMs = min<int>(abs(payload.toInt()),3600) * 1000;
-                   });
+    waiting = true;
+    connectionEstablished = true;
+}
 
-  client.subscribe("leddisplay/dimlevel", [](const String &payload)
-                   {
-                    Serial.printf("MQTT dim level = %s\n",payload.c_str());
-                    dimLevel = min<int>(abs(payload.toInt()),15);
-                   });   
+bool settingUp = false;
+void setup()
+{
+    WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+    pinMode(SETUP_PIN, INPUT_PULLUP);
 
-  client.subscribe("leddisplay/message", [](const String &payload)
-                   {
-                     Serial.printf("MQTT message = %s\n", payload.c_str());
+    pinMode(D1, OUTPUT);
+    digitalWrite(D1, 0);
 
-                     if (!payload.isEmpty())
-                     {
-                       waiting = false;
-                       dimTimerStart = millis();
-                       dimmed = false;
-                       mx.control(MD_MAX72XX::INTENSITY, mqtt_intensity);
-                     }
+    Serial.begin(115200);
+    EEPROM.begin(512);
 
-                     printText(0, MAX_DEVICES - 1, payload.c_str());
-                   });
+    mx = new MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
 
-  char addr[8];
-  sprintf(addr, "%d.%d", WiFi.localIP()[2], WiFi.localIP()[3]);
-  printText(0, MAX_DEVICES - 1, addr);
+    mx->begin();
+    mx->control(MD_MAX72XX::INTENSITY, DEFAULT_INTENSITY);
 
-  delay(3000);
+    if (digitalRead(SETUP_PIN) == LOW)
+    {
+        printText(mx, 0, MAX_DEVICES - 1, "config");
+        settingUp = true;
+        SetupWiFi();
+        delay(3000);
+        ESP.restart();
+    }
+    else
+    {
+        Serial.println("WORK");
 
-  printText(0, MAX_DEVICES - 1, "waiting");
+        // warning for example only, this will initialize empty memory into your vars
+        // always init flash memory or add some checksum bits
+        EEPROM.get(0, sett);
+        Serial.println("Settings loaded");
 
-  waiting = true;
-  connectionEstablished = true;
+        // connect to saved SSID
+        WiFi.begin();
+
+        // do smth
+        Serial.print("MQTT Port: ");
+        Serial.println(sett.mqtt_port, DEC);
+
+        Serial.print("IP param: ");
+        IPAddress ip(sett.mqtt_ip);
+        Serial.println(ip);
+
+        client = new EspMQTTClient("192.168.2.6", sett.mqtt_port, "MQTT2MAX7219");
+        client->enableHTTPWebUpdater("update", "update", "/"); // Activate the web updater, must be set before the first loop() call.
+        client->setOnConnectionEstablishedCallback(onConnectionEstablished);
+        client->enableDebuggingMessages(true);
+
+        // spin until connected
+        int timeout = 600;
+        printText(mx, 0, MAX_DEVICES - 1, "WiFi?");
+
+        Serial.println("Waiting for MQTT connection.");
+
+        while (!client->isMqttConnected())
+        {
+            client->loop();
+            delay(100);
+            timeout -= 10;
+            if (timeout <= 0)
+            {
+                Serial.println("Resetting after 60 second connection timeout.");
+                ESP.restart();
+            }
+        }
+
+        Serial.println("Setting up MQTT subscriptions.");
+
+        client->subscribe("leddisplay/brightness", [](const String &payload)
+                          {
+                             // map intensity of 0-100% to 0-15 for the max7219
+                             mqtt_intensity = (int)(min<int>(abs(payload.toInt()), 100) * 15 / 100);;
+                             mx->control(MD_MAX72XX::INTENSITY, mqtt_intensity); 
+                             Serial.printf("MQTT brightness = %d\n\r", mqtt_intensity); });
+
+        Serial.println("leddisplay/brightness subscribed");
+
+        client->subscribe("leddisplay/dimdelay", [](const String &payload)
+                          { dimDelayMs = (unsigned long)(min<int>(abs(payload.toInt()), 3600) * 1000); 
+                          Serial.printf("MQTT dim delay (ms) = %lu\n\r", dimDelayMs); });
+
+        Serial.println("leddisplay/dimdelay subscribed");
+
+        client->subscribe("leddisplay/dimlevel", [](const String &payload)
+                          {
+                        
+                        dimLevel = min<int>(abs(payload.toInt()),15); 
+                        Serial.printf("MQTT dim level = %d\n\r",dimLevel); });
+
+        Serial.println("leddisplay/dimlevel subscribed");
+
+        client->subscribe("leddisplay/message", [](const String &payload)
+                          {
+                             Serial.printf("MQTT message = %s\n\r", payload.c_str());
+
+                             if (!payload.isEmpty())
+                             {
+                                 waiting = false;
+                                 dimTimerStart = millis();
+                                 dimmed = false;
+                                 mx->control(MD_MAX72XX::INTENSITY, mqtt_intensity);
+                             }
+
+                             printText(mx, 0, MAX_DEVICES - 1, payload.c_str()); });
+
+        Serial.println("leddisplay/message subscribed");
+
+        char addr[8];
+        sprintf(addr, "%3d.%3d", WiFi.localIP()[2], WiFi.localIP()[3]);
+
+        printText(mx, 0, MAX_DEVICES - 1, addr);
+
+        Serial.println("Waiting 3 seconds");
+
+        delay(3000); // display the address for 3 seconds
+
+        printText(mx, 0, MAX_DEVICES - 1, "waiting");
+
+        Serial.println("All done subscribing");
+
+        dimTimerStart = millis();
+        settingUp = false;
+    }
 }
 
 void loop()
 {
-  client.loop();
+    if (settingUp)
+        return; // skip over the rest of this stuff if in wifi setup mode
 
-  if (waiting)
-  {
-    if (millis() - lastBreath > 50)
+    client->loop();
+
+    if (waiting)
     {
-      mx.control(MD_MAX72XX::INTENSITY, breath_intensity);
+        if (millis() - lastBreath > 50)
+        {
+            mx->control(MD_MAX72XX::INTENSITY, breath_intensity);
 
-      if (breath_intensity <= 1)
-      {
-        inhale = 1;
-        delay(750);
-      }
+            if (breath_intensity <= 1)
+            {
+                inhale = 1;
+                delay(750);
+            }
 
-      if (breath_intensity >= 15)
-        inhale = -1;
+            if (breath_intensity >= 15)
+                inhale = -1;
 
-      breath_intensity += inhale;
+            breath_intensity += inhale;
 
-      lastBreath = millis();
+            lastBreath = millis();
+        }
     }
-  }
 
-  if (!waiting && !dimmed && (millis() - dimTimerStart > dimDelayMs))
-  {
-    Serial.println("dimming");
-    dimmed = true;
-    mx.control(MD_MAX72XX::INTENSITY, dimLevel);
-  }
+    if (!waiting && !dimmed && (millis() - dimTimerStart > dimDelayMs))
+    {
+        Serial.printf("Dimming to %i\n\r", dimLevel);
+        dimmed = true;
+        mx->control(MD_MAX72XX::INTENSITY, dimLevel);
+    }
 }
