@@ -110,21 +110,21 @@ void setup()
                           {
                              // map intensity of 0-100% to 0-15 for the max7219
                              mqtt_intensity = (int)(min<int>(abs(payload.toInt()), 100) * 15 / 100);;
-                             mx->control(MD_MAX72XX::INTENSITY, mqtt_intensity); 
+                             mx->control(MD_MAX72XX::INTENSITY, mqtt_intensity);
                              Serial.printf("MQTT brightness = %d\n\r", mqtt_intensity); });
 
         Serial.println("leddisplay/brightness subscribed");
 
         client->subscribe("leddisplay/dimdelay", [](const String &payload)
-                          { dimDelayMs = (unsigned long)(min<int>(abs(payload.toInt()), 3600) * 1000); 
+                          { dimDelayMs = (unsigned long)(min<int>(abs(payload.toInt()), 3600) * 1000);
                           Serial.printf("MQTT dim delay (ms) = %lu\n\r", dimDelayMs); });
 
         Serial.println("leddisplay/dimdelay subscribed");
 
         client->subscribe("leddisplay/dimlevel", [](const String &payload)
                           {
-                        
-                        dimLevel = min<int>(abs(payload.toInt()),15); 
+
+                        dimLevel = min<int>(abs(payload.toInt()),15);
                         Serial.printf("MQTT dim level = %d\n\r",dimLevel); });
 
         Serial.println("leddisplay/dimlevel subscribed");
@@ -144,6 +144,21 @@ void setup()
                              printText(mx, 0, MAX_DEVICES - 1, payload.c_str()); });
 
         Serial.println("leddisplay/message subscribed");
+
+        client->subscribe("leddisplay/restart", [](const String &payload)
+                          {
+                             Serial.printf("MQTT message = %s\n\r", payload.c_str());
+
+                             if (!payload.isEmpty())
+                             {
+                                if (payload.toInt() == 1) {
+                                    system_restart();
+                                }
+                             }
+
+                             printText(mx, 0, MAX_DEVICES - 1, payload.c_str()); });
+
+        Serial.println("leddisplay/restart subscribed");
 
         char addr[8];
         sprintf(addr, "%3d.%3d", WiFi.localIP()[2], WiFi.localIP()[3]);

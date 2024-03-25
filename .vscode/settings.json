@@ -2,5 +2,13 @@
   "files.associations": {
     "chrono": "cpp",
     "cmath": "cpp"
-  }
+  },
+  "vsmqtt.brokerProfiles": [
+    {
+      "name": "babel",
+      "host": "192.168.2.6",
+      "port": 24552,
+      "clientId": "vsmqtt_client_d35f"
+    }
+  ]
 }
