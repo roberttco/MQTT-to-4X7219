@@ -10,8 +10,8 @@ Settings sett;
 
 MD_MAX72XX *mx;
 
-bool connectionEstablished = false;
-bool waiting = false;
+static bool connectionEstablished = false;
+static bool waiting = false;
 
 // waiting breathing intensity change
 unsigned long lastBreath = 0;
@@ -53,7 +53,16 @@ void setup()
     mx->begin();
     mx->control(MD_MAX72XX::INTENSITY, DEFAULT_INTENSITY);
 
-    if (digitalRead(SETUP_PIN) == LOW)
+    EEPROM.get(0, sett);
+    Serial.println("Settings loaded");
+    Serial.print("   flags: ");
+    Serial.println(sett.flags);
+    Serial.print("    port: ");
+    Serial.println(sett.mqtt_port);
+    Serial.print("      ip: ");
+    Serial.println(IPAddress(sett.mqtt_ip).toString());
+
+    if ((digitalRead(SETUP_PIN) == LOW) || (sett.flags == FLAGS_CLEAR))
     {
         printText(mx, 0, MAX_DEVICES - 1, "config");
         settingUp = true;
@@ -63,12 +72,8 @@ void setup()
     }
     else
     {
-        Serial.println("WORK");
-
-        // warning for example only, this will initialize empty memory into your vars
-        // always init flash memory or add some checksum bits
-        EEPROM.get(0, sett);
-        Serial.println("Settings loaded");
+        WiFi.setAutoReconnect(true);
+        WiFi.persistent(true);
 
         // connect to saved SSID
         WiFi.begin();
@@ -78,30 +83,66 @@ void setup()
         Serial.println(sett.mqtt_port, DEC);
 
         Serial.print("IP param: ");
-        IPAddress ip(sett.mqtt_ip);
-        Serial.println(ip);
+        IPAddress mqtt_server_ip(sett.mqtt_ip);
+        Serial.println(mqtt_server_ip);
 
-        client = new EspMQTTClient("192.168.2.6", sett.mqtt_port, "MQTT2MAX7219");
+        unsigned long wifi_connect_start = millis();
+        unsigned long wifi_connect_timeout = MQTT_TIMEOUT_MS; // 15 seconds
+
+        printText(mx, 0, MAX_DEVICES - 1, "WiFi?");
+
+        while (!WiFi.isConnected())
+        {
+            delay(500);
+
+            if (WiFi.isConnected())
+                break;
+
+            if (millis() - wifi_connect_start > wifi_connect_timeout)
+            {
+                sett.flags = FLAGS_CLEAR;
+                EEPROM.put(0, sett);
+                printText(mx, 0, MAX_DEVICES - 1, "Die");
+                delay(3000);
+                ESP.reset();
+            }
+        }
+
+        char a[16];
+        sprintf(a, "%3d.%3d", WiFi.localIP()[2], WiFi.localIP()[3]);
+        printText(mx, 0, MAX_DEVICES - 1, a);
+
+        Serial.println("Waiting for MQTT connection.");
+
+        strcpy(a, mqtt_server_ip.toString().c_str());
+        client = new EspMQTTClient(a, sett.mqtt_port, "MQTT2MAX7219");
+
         client->enableHTTPWebUpdater("update", "update", "/"); // Activate the web updater, must be set before the first loop() call.
         client->setOnConnectionEstablishedCallback(onConnectionEstablished);
         client->enableDebuggingMessages(true);
 
+        unsigned long mqtt_connect_start = millis();
+        unsigned long mqtt_connect_timeout = MQTT_TIMEOUT_MS; // 15 seconds
+
         // spin until connected
-        int timeout = 600;
-        printText(mx, 0, MAX_DEVICES - 1, "WiFi?");
-
-        Serial.println("Waiting for MQTT connection.");
-
         while (!client->isMqttConnected())
         {
             client->loop();
-            delay(100);
-            timeout -= 10;
-            if (timeout <= 0)
+
+            if (connectionEstablished)
+                break;
+
+            // timed out waiting for connection
+            if (millis() - mqtt_connect_start > mqtt_connect_timeout)
             {
-                Serial.println("Resetting after 60 second connection timeout.");
-                ESP.restart();
+                sett.flags = FLAGS_CLEAR;
+                EEPROM.put(0, sett);
+                printText(mx, 0, MAX_DEVICES - 1, "Die");
+                delay(3000);
+                ESP.reset();
             }
+
+            delay(100);
         }
 
         Serial.println("Setting up MQTT subscriptions.");
@@ -160,18 +201,11 @@ void setup()
 
         Serial.println("leddisplay/restart subscribed");
 
-        char addr[8];
-        sprintf(addr, "%3d.%3d", WiFi.localIP()[2], WiFi.localIP()[3]);
-
-        printText(mx, 0, MAX_DEVICES - 1, addr);
-
-        Serial.println("Waiting 3 seconds");
-
-        delay(3000); // display the address for 3 seconds
-
         printText(mx, 0, MAX_DEVICES - 1, "waiting");
 
         Serial.println("All done subscribing");
+
+        delay(1000);
 
         dimTimerStart = millis();
         settingUp = false;
@@ -194,7 +228,7 @@ void loop()
             if (breath_intensity <= 1)
             {
                 inhale = 1;
-                delay(750);
+                // delay(750);
             }
 
             if (breath_intensity >= 15)

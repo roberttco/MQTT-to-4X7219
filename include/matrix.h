@@ -21,6 +21,7 @@
 #define SCROLL_DELAY 75
 #define DEFAULT_INTENSITY 5
 #define DIM_INTENSITY 2
+#define MQTT_TIMEOUT_MS 15000
 
 void printText(MD_MAX72XX * mx, uint8_t modStart, uint8_t modEnd, const char *pMsg);
 
